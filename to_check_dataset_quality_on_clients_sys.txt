@@ -1,0 +1,127 @@
+Data-level (not config, but worth checking)
+
+Check your annotation box sizes distribution — if very few training examples actually have small balls, no amount of augmentation config fully compensates for a genuine data scarcity issue. Worth a quick check:
+
+bashpython -c "
+import json
+d = json.load(open('dataset/balls/train/annotations.json'))
+areas = [a['bbox'][2]*a['bbox'][3] for a in d['annotations']]
+small = sum(1 for a in areas if a < 32*32)
+print(f'Total: {len(areas)}, Small (<32x32 px): {small} ({100*small/len(areas):.1f}%)')
+"
+
+Run the small-object distribution check first — if your dataset genuinely has very few small-ball examples, augmentation alone has a ceiling:
+bashpython -c "
+import json
+d = json.load(open('dataset/balls/train/annotations.json'))
+areas = [a['bbox'][2]*a['bbox'][3] for a in d['annotations']]
+small = sum(1 for a in areas if a < 32*32)
+print(f'Total: {len(areas)}, Small (<32x32 px): {small} ({100*small/len(areas):.1f}%)')
+"
+
+
+Second high-leverage check: per-class breakdown
+If one of your 3 classes is dragging the average down (e.g., poor annotations or fewer examples for one ball type), that's a different fix than "train longer." Get the per-category AP:
+bashpython -c "
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+coco_gt = COCO('dataset/balls/test/annotations.json')
+coco_dt = coco_gt.loadRes('bbox.json')
+E = COCOeval(coco_gt, coco_dt, 'bbox')
+E.evaluate(); E.accumulate()
+import numpy as np
+for i, cat in enumerate(coco_gt.loadCats(coco_gt.getCatIds())):
+    print(cat['name'], round(np.mean(E.eval['precision'][:,:,i,0,-1][E.eval['precision'][:,:,i,0,-1] > -1]), 3))
+"
+
+
+1. Instance count per class
+bashpython -c "
+import json
+from collections import Counter
+d = json.load(open('dataset/balls/train/annotations.json'))
+cat_names = {c['id']: c['name'] for c in d['categories']}
+counts = Counter(cat_names[a['category_id']] for a in d['annotations'])
+print(counts)
+"
+2. Average box size per class (are soccerballs systematically smaller/farther from camera in your images?)
+bashpython -c "
+import json
+from collections import defaultdict
+d = json.load(open('dataset/balls/train/annotations.json'))
+cat_names = {c['id']: c['name'] for c in d['categories']}
+sizes = defaultdict(list)
+for a in d['annotations']:
+    sizes[cat_names[a['category_id']]].append(a['bbox'][2]*a['bbox'][3])
+for k,v in sizes.items():
+    print(k, 'count:', len(v), 'avg area:', round(sum(v)/len(v)))
+"
+
+
+The most useful next step: actually look at the data
+Before any more config changes, visually inspect a sample of soccerball ground-truth crops — this takes 2 minutes and will immediately tell you which of the two problems above you're facing:
+bashpython -c "
+import json, cv2, os
+d = json.load(open('dataset/balls/train/annotations.json'))
+cat_id = [c['id'] for c in d['categories'] if c['name']=='soccerball'][0]
+img_lookup = {im['id']: im['file_name'] for im in d['images']}
+os.makedirs('debug_crops', exist_ok=True)
+count = 0
+for a in d['annotations']:
+    if a['category_id'] == cat_id and count < 20:
+        img = cv2.imread(f'dataset/balls/train/{img_lookup[a[\"image_id\"]]}')
+        if img is None: continue
+        x,y,w,h = [int(v) for v in a['bbox']]
+        crop = img[max(0,y):y+h, max(0,x):x+w]
+        if crop.size > 0:
+            cv2.imwrite(f'debug_crops/soccer_{count}.jpg', crop)
+            count += 1
+print(f'Saved {count} crops to debug_crops/')
+"
+
+ image resolution consistency
+Your "avg area" numbers are in raw pixel area, but if soccerball images come from a different source/resolution than basketball images, the comparison isn't apples-to-apples. Quick check:
+python -c "
+import json
+from collections import defaultdict
+d = json.load(open('dataset/balls/train/annotations.json'))
+img_lookup = {im['id']: (im['width'], im['height']) for im in d['images']}
+cat_names = {c['id']: c['name'] for c in d['categories']}
+res_by_class = defaultdict(list)
+for a in d['annotations']:
+    w,h = img_lookup[a['image_id']]
+    res_by_class[cat_names[a['category_id']]].append(w*h)
+for k,v in res_by_class.items():
+    print(k, 'avg image area:', round(sum(v)/len(v)))
+"
+
+
+ Quantify how bad this is across the whole soccerball set:
+ python -c "
+import json
+d = json.load(open('dataset/balls/train/annotations.json'))
+cat_id = [c['id'] for c in d['categories'] if c['name']=='soccerball'][0]
+areas = [a['bbox'][2]*a['bbox'][3] for a in d['annotations'] if a['category_id']==cat_id]
+tiny = sum(1 for a in areas if a < 20*20)
+very_tiny = sum(1 for a in areas if a < 12*12)
+print(f'Total soccerball: {len(areas)}')
+print(f'Under 20x20px: {tiny} ({100*tiny/len(areas):.1f}%)')
+print(f'Under 12x12px: {very_tiny} ({100*very_tiny/len(areas):.1f}%)')
+"
+
+Worth checking before considering architecture changes
+python -c "
+import json
+d = json.load(open('dataset/balls/train/annotations.json'))
+cat_id = [c['id'] for c in d['categories'] if c['name']=='soccerball'][0]
+img_lookup = {im['id']: (im['width'], im['height']) for im in d['images']}
+for a in d['annotations'][:10]:
+    if a['category_id'] == cat_id:
+        w, h = img_lookup[a['image_id']]
+        bw, bh = a['bbox'][2], a['bbox'][3]
+        scale = 320 / w
+        print(f'source img {w}x{h}, box {bw:.0f}x{bh:.0f}px -> after 320 resize: {bw*scale:.1f}x{bh*scale:.1f}px')"
+        
+If this shows boxes shrinking to single-digit pixels after the 320 resize, no architecture change — stride-4 head or otherwise — is going to reliably detect them.
+
+

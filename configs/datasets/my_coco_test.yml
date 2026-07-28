@@ -1,0 +1,21 @@
+metric: COCO
+num_classes: 3
+
+TrainDataset:
+  !COCODataSet
+    image_dir: ""
+    anno_path: annotations.json
+    dataset_dir: dataset/balls/train
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+EvalDataset:
+  !COCODataSet
+    image_dir: ""
+    anno_path: _annotations.coco.json
+    dataset_dir: dataset/basketball/test
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+TestDataset:
+  !ImageFolder
+    anno_path: annotations.json
+    dataset_dir: dataset/balls/test
